@@ -1,11 +1,14 @@
 package snapshot
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/fortiblox/x1-nimbus/pkg/types"
 )
@@ -24,6 +27,10 @@ type VerifyResult struct {
 	LamportsTotal uint64
 	// ComputedAccountsHash is the computed accounts hash.
 	ComputedAccountsHash types.Hash
+	// ComputedBankHash is the computed bank hash.
+	ComputedBankHash types.Hash
+	// FailedAccounts contains pubkeys of accounts that failed verification.
+	FailedAccounts []types.Pubkey
 }
 
 // VerifyConfig contains configuration for verification.
@@ -32,6 +39,8 @@ type VerifyConfig struct {
 	VerifyAccountsHash bool
 	// VerifyBankHash enables verification of the bank hash.
 	VerifyBankHash bool
+	// VerifyIndividualAccounts enables verification of each account's hash.
+	VerifyIndividualAccounts bool
 	// ProgressCallback is called with verification progress.
 	ProgressCallback ProgressCallback
 }
@@ -39,8 +48,9 @@ type VerifyConfig struct {
 // DefaultVerifyConfig returns a default verification configuration.
 func DefaultVerifyConfig() VerifyConfig {
 	return VerifyConfig{
-		VerifyAccountsHash: true,
-		VerifyBankHash:     true,
+		VerifyAccountsHash:       true,
+		VerifyBankHash:           true,
+		VerifyIndividualAccounts: false, // Disabled by default for performance
 	}
 }
 
@@ -86,6 +96,21 @@ func VerifySnapshotWithConfig(path string, config VerifyConfig) (*VerifyResult, 
 	return verifyArchive(path, config, result)
 }
 
+// VerifySnapshotIntegrity performs a full verification of a snapshot.
+// This is the comprehensive verification function that checks:
+// - Manifest integrity
+// - Individual account hashes
+// - Accounts hash (16-ary Merkle tree)
+// - Bank hash
+func VerifySnapshotIntegrity(snapshotPath string) (*VerifyResult, error) {
+	config := VerifyConfig{
+		VerifyAccountsHash:       true,
+		VerifyBankHash:           true,
+		VerifyIndividualAccounts: true,
+	}
+	return VerifySnapshotWithConfig(snapshotPath, config)
+}
+
 // verifyArchive verifies a snapshot archive.
 func verifyArchive(archivePath string, config VerifyConfig, result *VerifyResult) (*VerifyResult, error) {
 	archive, err := OpenSnapshotArchive(archivePath)
@@ -101,14 +126,14 @@ func verifyArchive(archivePath string, config VerifyConfig, result *VerifyResult
 	}
 	result.ManifestValid = true
 
-	if config.VerifyAccountsHash {
+	if config.VerifyAccountsHash || config.VerifyBankHash {
 		// Reset archive to read accounts
 		if err := archive.Reset(); err != nil {
 			return result, fmt.Errorf("failed to reset archive: %w", err)
 		}
 
-		// Collect all account hashes
-		var accountHashes []types.Hash
+		// Collect all accounts with their hashes for verification
+		var accountRefs []accountHashRef
 		var accountsCount uint64
 		var lamportsTotal uint64
 
@@ -145,25 +170,39 @@ func verifyArchive(archivePath string, config VerifyConfig, result *VerifyResult
 				lamportsTotal += uint64(entry.Account.Lamports)
 
 				// Compute account hash
-				hash := entry.Account.Hash(entry.StoredMeta.Pubkey)
-				accountHashes = append(accountHashes, hash)
+				hash := ComputeAccountHash(entry.Account, entry.StoredMeta.Pubkey)
+
+				// Verify individual account if enabled
+				if config.VerifyIndividualAccounts {
+					expectedHash := entry.Account.Hash(entry.StoredMeta.Pubkey)
+					if hash != expectedHash {
+						result.FailedAccounts = append(result.FailedAccounts, entry.StoredMeta.Pubkey)
+					}
+				}
+
+				accountRefs = append(accountRefs, accountHashRef{
+					pubkey: entry.StoredMeta.Pubkey,
+					hash:   hash,
+				})
 			}
 		}
 
 		result.AccountsCount = accountsCount
 		result.LamportsTotal = lamportsTotal
 
-		// Compute and verify accounts hash
-		computedHash := computeAccountsHash(accountHashes)
-		result.ComputedAccountsHash = computedHash
-		result.AccountsHashValid = computedHash == manifest.AccountsHash
-	}
+		// Compute and verify accounts hash using 16-ary Merkle tree
+		if config.VerifyAccountsHash {
+			computedHash := computeAccountsHashMerkle16(accountRefs)
+			result.ComputedAccountsHash = computedHash
+			result.AccountsHashValid = computedHash == manifest.AccountsHash
+		}
 
-	if config.VerifyBankHash {
-		// Bank hash verification requires additional state
-		// For now, we'll mark it as valid if accounts hash is valid
-		// Full bank hash verification would require status cache and other data
-		result.BankHashValid = result.AccountsHashValid
+		// Compute and verify bank hash
+		if config.VerifyBankHash {
+			computedBankHash := computeBankHashFromAccounts(accountRefs, manifest)
+			result.ComputedBankHash = computedBankHash
+			result.BankHashValid = computedBankHash == manifest.BankHash
+		}
 	}
 
 	return result, nil
@@ -184,15 +223,15 @@ func verifyDirectory(dirPath string, config VerifyConfig, result *VerifyResult) 
 	}
 	result.ManifestValid = true
 
-	if config.VerifyAccountsHash {
+	if config.VerifyAccountsHash || config.VerifyBankHash {
 		// Find accounts directory
 		accountsDir := filepath.Join(dirPath, "accounts")
 		if _, err := os.Stat(accountsDir); os.IsNotExist(err) {
 			accountsDir = filepath.Join(dirPath, "snapshots", fmt.Sprintf("%d", manifest.Slot), "accounts")
 		}
 
-		// Collect all account hashes
-		var accountHashes []types.Hash
+		// Collect all accounts with their hashes
+		var accountRefs []accountHashRef
 		var accountsCount uint64
 		var lamportsTotal uint64
 
@@ -222,8 +261,20 @@ func verifyDirectory(dirPath string, config VerifyConfig, result *VerifyResult) 
 				lamportsTotal += uint64(entry.Account.Lamports)
 
 				// Compute account hash
-				hash := entry.Account.Hash(entry.StoredMeta.Pubkey)
-				accountHashes = append(accountHashes, hash)
+				hash := ComputeAccountHash(entry.Account, entry.StoredMeta.Pubkey)
+
+				// Verify individual account if enabled
+				if config.VerifyIndividualAccounts {
+					expectedHash := entry.Account.Hash(entry.StoredMeta.Pubkey)
+					if hash != expectedHash {
+						result.FailedAccounts = append(result.FailedAccounts, entry.StoredMeta.Pubkey)
+					}
+				}
+
+				accountRefs = append(accountRefs, accountHashRef{
+					pubkey: entry.StoredMeta.Pubkey,
+					hash:   hash,
+				})
 			}
 			reader.Close()
 		}
@@ -231,22 +282,49 @@ func verifyDirectory(dirPath string, config VerifyConfig, result *VerifyResult) 
 		result.AccountsCount = accountsCount
 		result.LamportsTotal = lamportsTotal
 
-		// Compute and verify accounts hash
-		computedHash := computeAccountsHash(accountHashes)
-		result.ComputedAccountsHash = computedHash
-		result.AccountsHashValid = computedHash == manifest.AccountsHash
-	}
+		// Compute and verify accounts hash using 16-ary Merkle tree
+		if config.VerifyAccountsHash {
+			computedHash := computeAccountsHashMerkle16(accountRefs)
+			result.ComputedAccountsHash = computedHash
+			result.AccountsHashValid = computedHash == manifest.AccountsHash
+		}
 
-	if config.VerifyBankHash {
-		// Bank hash verification requires additional state
-		result.BankHashValid = result.AccountsHashValid
+		// Compute and verify bank hash
+		if config.VerifyBankHash {
+			computedBankHash := computeBankHashFromAccounts(accountRefs, manifest)
+			result.ComputedBankHash = computedBankHash
+			result.BankHashValid = computedBankHash == manifest.BankHash
+		}
 	}
 
 	return result, nil
 }
 
-// VerifyManifestHash verifies the hash of the manifest file itself.
-func VerifyManifestHash(manifestPath string, expectedHash types.Hash) error {
+// accountHashRef holds a pubkey and its computed hash for sorting.
+type accountHashRef struct {
+	pubkey types.Pubkey
+	hash   types.Hash
+}
+
+// VerifyManifestHash verifies the hash of the manifest data against an expected hash.
+func VerifyManifestHash(manifest *SnapshotManifest, expectedHash types.Hash) error {
+	// Serialize the manifest to binary
+	data, err := manifest.SerializeBinary()
+	if err != nil {
+		return fmt.Errorf("failed to serialize manifest: %w", err)
+	}
+
+	computedHash := types.SHA256(data)
+	if computedHash != expectedHash {
+		return fmt.Errorf("%w: manifest hash mismatch, expected %s, got %s",
+			ErrHashMismatch, expectedHash.String(), computedHash.String())
+	}
+
+	return nil
+}
+
+// VerifyManifestFileHash verifies the hash of a manifest file on disk.
+func VerifyManifestFileHash(manifestPath string, expectedHash types.Hash) error {
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return fmt.Errorf("failed to read manifest: %w", err)
@@ -261,14 +339,176 @@ func VerifyManifestHash(manifestPath string, expectedHash types.Hash) error {
 	return nil
 }
 
-// VerifyAccountHash verifies the hash of a single account.
-func VerifyAccountHash(pubkey types.Pubkey, account *types.Account, expectedHash types.Hash) error {
-	computedHash := account.Hash(pubkey)
+// ComputeAccountHash computes the hash of an account.
+// Format: SHA256(lamports || rent_epoch || data || executable || owner || pubkey)
+// All values are little-endian encoded.
+func ComputeAccountHash(account *types.Account, pubkey types.Pubkey) types.Hash {
+	h := sha256.New()
+
+	// Write lamports (8 bytes, little-endian)
+	var lamportsBuf [8]byte
+	binary.LittleEndian.PutUint64(lamportsBuf[:], uint64(account.Lamports))
+	h.Write(lamportsBuf[:])
+
+	// Write rent epoch (8 bytes, little-endian)
+	var rentEpochBuf [8]byte
+	binary.LittleEndian.PutUint64(rentEpochBuf[:], uint64(account.RentEpoch))
+	h.Write(rentEpochBuf[:])
+
+	// Write data
+	h.Write(account.Data)
+
+	// Write executable (1 byte)
+	if account.Executable {
+		h.Write([]byte{1})
+	} else {
+		h.Write([]byte{0})
+	}
+
+	// Write owner (32 bytes)
+	h.Write(account.Owner[:])
+
+	// Write pubkey (32 bytes)
+	h.Write(pubkey[:])
+
+	var result types.Hash
+	copy(result[:], h.Sum(nil))
+	return result
+}
+
+// VerifyAccountHash verifies the hash of a single account matches the expected hash.
+func VerifyAccountHash(account *types.Account, pubkey types.Pubkey, expectedHash types.Hash) error {
+	computedHash := ComputeAccountHash(account, pubkey)
 	if computedHash != expectedHash {
 		return fmt.Errorf("%w: account hash mismatch for %s, expected %s, got %s",
 			ErrHashMismatch, pubkey.String(), expectedHash.String(), computedHash.String())
 	}
 	return nil
+}
+
+// VerifyBankHash verifies the bank hash computed from all accounts matches the expected hash.
+// The bank hash is computed as a 16-ary Merkle tree of sorted account hashes.
+func VerifyBankHash(accounts []types.AccountRef, expectedBankHash types.Hash) error {
+	// Convert to accountHashRef for internal processing
+	refs := make([]accountHashRef, len(accounts))
+	for i, acc := range accounts {
+		refs[i] = accountHashRef{
+			pubkey: acc.Pubkey,
+			hash:   ComputeAccountHash(acc.Account, acc.Pubkey),
+		}
+	}
+
+	computedHash := computeAccountsHashMerkle16(refs)
+	if computedHash != expectedBankHash {
+		return fmt.Errorf("%w: bank hash mismatch, expected %s, got %s",
+			ErrHashMismatch, expectedBankHash.String(), computedHash.String())
+	}
+	return nil
+}
+
+// computeAccountsHashMerkle16 computes the 16-ary Merkle tree hash of account hashes.
+// Accounts are sorted by pubkey before computing.
+func computeAccountsHashMerkle16(accountRefs []accountHashRef) types.Hash {
+	if len(accountRefs) == 0 {
+		return types.ZeroHash
+	}
+
+	// Sort by pubkey
+	sort.Slice(accountRefs, func(i, j int) bool {
+		return bytes.Compare(accountRefs[i].pubkey[:], accountRefs[j].pubkey[:]) < 0
+	})
+
+	// Extract just the hashes in sorted order
+	hashes := make([]types.Hash, len(accountRefs))
+	for i, ref := range accountRefs {
+		hashes[i] = ref.hash
+	}
+
+	// Build 16-ary Merkle tree
+	return computeMerkle16Root(hashes)
+}
+
+// computeMerkle16Root computes the root of a 16-ary Merkle tree.
+func computeMerkle16Root(hashes []types.Hash) types.Hash {
+	if len(hashes) == 0 {
+		return types.ZeroHash
+	}
+	if len(hashes) == 1 {
+		return hashes[0]
+	}
+
+	const arity = 16
+
+	// Process level by level until we have a single root
+	for len(hashes) > 1 {
+		numParents := (len(hashes) + arity - 1) / arity
+		parents := make([]types.Hash, numParents)
+
+		for i := 0; i < numParents; i++ {
+			start := i * arity
+			end := start + arity
+			if end > len(hashes) {
+				end = len(hashes)
+			}
+			parents[i] = hashMerkle16Children(hashes[start:end])
+		}
+
+		hashes = parents
+	}
+
+	return hashes[0]
+}
+
+// hashMerkle16Children hashes a group of up to 16 child nodes.
+func hashMerkle16Children(children []types.Hash) types.Hash {
+	if len(children) == 0 {
+		return types.ZeroHash
+	}
+	if len(children) == 1 {
+		return children[0]
+	}
+
+	// Concatenate all child hashes and compute SHA256
+	h := sha256.New()
+	for _, child := range children {
+		h.Write(child[:])
+	}
+
+	var result types.Hash
+	copy(result[:], h.Sum(nil))
+	return result
+}
+
+// computeBankHashFromAccounts computes the bank hash from account hashes and manifest data.
+// The bank hash incorporates the accounts hash along with other bank state.
+func computeBankHashFromAccounts(accountRefs []accountHashRef, manifest *SnapshotManifest) types.Hash {
+	// Compute accounts hash first
+	accountsHash := computeAccountsHashMerkle16(accountRefs)
+
+	// Bank hash = SHA256(accounts_hash || slot || parent_bank_hash)
+	// For snapshots, we use a simplified version based on accounts hash
+	// The full bank hash would require additional state (parent hash, etc.)
+	h := sha256.New()
+	h.Write(accountsHash[:])
+
+	// Write slot
+	var slotBuf [8]byte
+	binary.LittleEndian.PutUint64(slotBuf[:], manifest.Slot)
+	h.Write(slotBuf[:])
+
+	// Write accounts count
+	var countBuf [8]byte
+	binary.LittleEndian.PutUint64(countBuf[:], manifest.AccountsCount)
+	h.Write(countBuf[:])
+
+	// Write total lamports
+	var lamportsBuf [8]byte
+	binary.LittleEndian.PutUint64(lamportsBuf[:], manifest.LamportsTotal)
+	h.Write(lamportsBuf[:])
+
+	var result types.Hash
+	copy(result[:], h.Sum(nil))
+	return result
 }
 
 // ComputeSnapshotHash computes the overall snapshot hash for verification.
@@ -383,4 +623,34 @@ func VerifyIncrementalChain(basePath, incrementalPath string) error {
 	}
 
 	return nil
+}
+
+// VerifyAccountEntry verifies a single account entry from an AppendVec file.
+func VerifyAccountEntry(entry *AccountEntry) error {
+	computedHash := ComputeAccountHash(entry.Account, entry.StoredMeta.Pubkey)
+	expectedHash := entry.Account.Hash(entry.StoredMeta.Pubkey)
+
+	if computedHash != expectedHash {
+		return fmt.Errorf("%w: account entry hash mismatch for %s",
+			ErrHashMismatch, entry.StoredMeta.Pubkey.String())
+	}
+	return nil
+}
+
+// ComputeAccountsHash computes the Merkle root of all account hashes.
+// This is exposed for external use when the caller already has account data.
+func ComputeAccountsHash(accounts []types.AccountRef) types.Hash {
+	if len(accounts) == 0 {
+		return types.ZeroHash
+	}
+
+	refs := make([]accountHashRef, len(accounts))
+	for i, acc := range accounts {
+		refs[i] = accountHashRef{
+			pubkey: acc.Pubkey,
+			hash:   ComputeAccountHash(acc.Account, acc.Pubkey),
+		}
+	}
+
+	return computeAccountsHashMerkle16(refs)
 }

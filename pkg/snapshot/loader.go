@@ -48,6 +48,9 @@ type ProgressCallback func(progress LoadProgress)
 type LoadConfig struct {
 	// VerifyHashes enables hash verification during load.
 	VerifyHashes bool
+	// VerifyBeforeLoad enables full verification before loading accounts.
+	// This is more thorough but slower as it reads the snapshot twice.
+	VerifyBeforeLoad bool
 	// ProgressCallback is called with progress updates.
 	ProgressCallback ProgressCallback
 	// BatchSize is the number of accounts to batch before inserting.
@@ -59,9 +62,20 @@ type LoadConfig struct {
 // DefaultLoadConfig returns a default load configuration.
 func DefaultLoadConfig() LoadConfig {
 	return LoadConfig{
-		VerifyHashes: true,
-		BatchSize:    1000,
-		NumWorkers:   4,
+		VerifyHashes:     true,
+		VerifyBeforeLoad: false, // Disabled by default for performance
+		BatchSize:        1000,
+		NumWorkers:       4,
+	}
+}
+
+// StrictLoadConfig returns a strict load configuration with full verification.
+func StrictLoadConfig() LoadConfig {
+	return LoadConfig{
+		VerifyHashes:     true,
+		VerifyBeforeLoad: true,
+		BatchSize:        1000,
+		NumWorkers:       4,
 	}
 }
 
@@ -97,6 +111,26 @@ func (l *SnapshotLoader) Load(path string) (*LoadResult, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat path: %w", err)
+	}
+
+	// Verify snapshot integrity before loading if enabled
+	if l.config.VerifyBeforeLoad {
+		l.reportProgress("Verifying snapshot integrity", 0, 0, 0, 0)
+		verifyResult, err := VerifySnapshotIntegrity(path)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot verification failed: %w", err)
+		}
+		if !verifyResult.ManifestValid {
+			return nil, fmt.Errorf("%w: manifest verification failed before load", ErrHashMismatch)
+		}
+		if !verifyResult.AccountsHashValid {
+			return nil, fmt.Errorf("%w: accounts hash verification failed before load", ErrHashMismatch)
+		}
+		if len(verifyResult.FailedAccounts) > 0 {
+			return nil, fmt.Errorf("%w: %d accounts failed hash verification before load",
+				ErrHashMismatch, len(verifyResult.FailedAccounts))
+		}
+		l.reportProgress("Verification passed", verifyResult.AccountsCount, verifyResult.AccountsCount, 0, 0)
 	}
 
 	if info.IsDir() {
@@ -422,7 +456,8 @@ func isAccountsFile(name string) bool {
 	return false
 }
 
-// computeAccountsHash computes the merkle root of account hashes.
+// computeAccountsHash computes the 16-ary merkle root of account hashes.
+// This matches the Solana accounts hash computation.
 func computeAccountsHash(hashes []types.Hash) types.Hash {
 	if len(hashes) == 0 {
 		return types.ZeroHash
@@ -431,23 +466,44 @@ func computeAccountsHash(hashes []types.Hash) types.Hash {
 		return hashes[0]
 	}
 
-	// Build merkle tree
+	const arity = 16
+
+	// Build 16-ary merkle tree
 	for len(hashes) > 1 {
-		var nextLevel []types.Hash
-		for i := 0; i < len(hashes); i += 2 {
-			if i+1 < len(hashes) {
-				combined := types.SHA256Multi(hashes[i][:], hashes[i+1][:])
-				nextLevel = append(nextLevel, combined)
-			} else {
-				// Odd number, hash with itself
-				combined := types.SHA256Multi(hashes[i][:], hashes[i][:])
-				nextLevel = append(nextLevel, combined)
+		numParents := (len(hashes) + arity - 1) / arity
+		parents := make([]types.Hash, numParents)
+
+		for i := 0; i < numParents; i++ {
+			start := i * arity
+			end := start + arity
+			if end > len(hashes) {
+				end = len(hashes)
 			}
+			parents[i] = hashMerkleChildren(hashes[start:end])
 		}
-		hashes = nextLevel
+
+		hashes = parents
 	}
 
 	return hashes[0]
+}
+
+// hashMerkleChildren hashes a group of up to 16 child nodes.
+func hashMerkleChildren(children []types.Hash) types.Hash {
+	if len(children) == 0 {
+		return types.ZeroHash
+	}
+	if len(children) == 1 {
+		return children[0]
+	}
+
+	// Concatenate all child hashes and compute SHA256
+	data := make([]byte, 0, len(children)*32)
+	for _, child := range children {
+		data = append(data, child[:]...)
+	}
+
+	return types.SHA256(data)
 }
 
 // LoadIncrementalSnapshot loads an incremental snapshot on top of a base snapshot.

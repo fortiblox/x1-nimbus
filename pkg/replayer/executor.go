@@ -208,25 +208,18 @@ func (e *Executor) ExecuteInstruction(ctx *syscall.ExecutionContext, instruction
 	return executor.Execute(ctx, instruction)
 }
 
-// executeBPFProgram executes a BPF program.
+// executeBPFProgram executes a BPF program using the sBPF VM.
 func (e *Executor) executeBPFProgram(ctx *syscall.ExecutionContext, instruction *types.Instruction) error {
-	// Load the program account
-	programAccount, err := e.accountsDB.GetAccount(instruction.ProgramID)
+	// Create the BPF executor with the accounts database and execution context
+	bpfExecutor := NewBPFExecutor(e.accountsDB, ctx)
+
+	// Execute the BPF program
+	err := bpfExecutor.Execute(instruction.ProgramID, instruction)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrProgramNotFound, err)
+		return fmt.Errorf("BPF execution failed: %w", err)
 	}
 
-	if programAccount == nil {
-		return fmt.Errorf("%w: program account not found", ErrProgramNotFound)
-	}
-
-	if !programAccount.Executable {
-		return fmt.Errorf("%w: %s", ErrProgramNotExecutable, instruction.ProgramID.String())
-	}
-
-	// TODO: Execute BPF program using the SVM
-	// For now, return an error indicating BPF execution is not implemented
-	return errors.New("BPF program execution not yet implemented")
+	return nil
 }
 
 // loadTransactionAccounts loads all accounts referenced by a transaction.
@@ -240,7 +233,7 @@ func (e *Executor) loadTransactionAccounts(tx *types.Transaction) ([]*syscall.Ac
 
 	for i, pubkey := range tx.Message.AccountKeys {
 		account, err := e.accountsDB.GetAccount(pubkey)
-		if err != nil {
+		if err != nil || account == nil {
 			// Account doesn't exist - create empty account
 			account = &types.Account{
 				Lamports: 0,

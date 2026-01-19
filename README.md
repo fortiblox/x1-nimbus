@@ -13,7 +13,7 @@ X1-Nimbus is a lightweight, full-verifying node that independently validates eve
 - **Native Program Execution** - System, Token, Vote, Stake, BPF Loader, ALT, Compute Budget
 - **BPF Program Support** - sBPF interpreter for deployed programs
 - **Bank Hash Verification** - Exact hash compatibility with Solana/X1
-- **RPC Fallback** - Works with standard RPC endpoints (no Geyser required)
+- **RPC Based** - Works with standard RPC endpoints
 - **Auto-Reconnection** - Automatic reconnection on network disruptions
 - **Prometheus Metrics** - Full observability at `/metrics`
 
@@ -50,16 +50,15 @@ PoH (Proof of History) verification requires entry-level data (num_hashes, entry
 ## Architecture
 
 ```
-Block Source (Geyser/RPC)
+    RPC Endpoint
          |
          v
 +-----------------------------+
 |    VERIFICATION PIPELINE    |
 |  +------------------------+ |
-|  | 1. PoH Verification    | |
-|  | 2. Signature Verify    | |
-|  | 3. TX Execution        | |
-|  | 4. State Verification  | |
+|  | 1. Signature Verify    | |
+|  | 2. TX Execution        | |
+|  | 3. State Verification  | |
 |  +------------------------+ |
 +-----------------------------+
          |
@@ -71,8 +70,8 @@ Block Source (Geyser/RPC)
 
 ```
                     +------------------+
-                    |   Geyser gRPC    |
-                    |   (or RPC Poll)  |
+                    |    RPC Client    |
+                    |  (Block Polling) |
                     +--------+---------+
                              |
                              v
@@ -84,8 +83,8 @@ Block Source (Geyser/RPC)
               |              |              |
               v              v              v
       +-------+----+  +------+-----+  +-----+------+
-      | Signature  |  |    PoH     |  |   Bank     |
-      | Verifier   |  |  Verifier  |  |   Hash     |
+      | Signature  |  |   State    |  |   Bank     |
+      | Verifier   |  |  Executor  |  |   Hash     |
       +-------+----+  +------+-----+  +-----+------+
               |              |              |
               +--------------+--------------+
@@ -154,8 +153,6 @@ mkdir -p /root/.config/x1-nimbus
 6. Create `/root/.config/x1-nimbus/config.json`:
 ```json
 {
-    "geyser_endpoint": "https://grpc.xolana.xen.network:443",
-    "geyser_token": "",
     "rpc_endpoint": "https://rpc.mainnet.x1.xyz",
     "rpc_server": {
         "enabled": false,
@@ -170,7 +167,6 @@ mkdir -p /root/.config/x1-nimbus
     "commitment": "confirmed",
     "verification": {
         "verify_signatures": true,
-        "verify_poh": true,
         "verify_bank_hash": true
     },
     "performance": {
@@ -195,13 +191,6 @@ sudo systemctl start x1-nimbus
 
 ## Configuration Options
 
-### Geyser Settings
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `geyser_endpoint` | Geyser gRPC endpoint URL | `https://grpc.xolana.xen.network:443` |
-| `geyser_token` | Authentication token for Geyser | (empty) |
-
 ### RPC Settings
 
 | Option | Description | Default |
@@ -215,7 +204,6 @@ sudo systemctl start x1-nimbus
 | Option | Description | Default |
 |--------|-------------|---------|
 | `verification.verify_signatures` | Verify Ed25519 signatures | `true` |
-| `verification.verify_poh` | Verify Proof of History | `true` |
 | `verification.verify_bank_hash` | Verify bank hash | `true` |
 
 ### General Settings
@@ -287,7 +275,6 @@ Run the binary directly with custom options:
 ```bash
 /opt/x1-nimbus/bin/nimbus \
     --data-dir=/mnt/x1-nimbus \
-    --geyser-url=https://grpc.xolana.xen.network:443 \
     --rpc-endpoint=https://rpc.mainnet.x1.xyz \
     --commitment=confirmed \
     --log-level=info \
@@ -299,16 +286,13 @@ Available flags:
 | Flag | Description |
 |------|-------------|
 | `--data-dir` | Data directory for accounts and blocks |
-| `--geyser-url` | Geyser gRPC endpoint URL |
-| `--geyser-token` | Geyser authentication token |
-| `--rpc-endpoint` | RPC endpoint for fallback |
+| `--rpc-endpoint` | RPC endpoint for block fetching |
 | `--rpc-addr` | Local RPC server listen address |
 | `--enable-rpc` | Enable local JSON-RPC server |
 | `--commitment` | Commitment level |
 | `--log-level` | Log level |
 | `--poll-interval` | RPC polling interval |
 | `--skip-sig-verify` | Skip signature verification (unsafe) |
-| `--skip-poh` | Skip PoH verification (unsafe) |
 | `--verify-bank-hash` | Verify bank hash against network |
 | `--stats` | Show periodic statistics |
 | `--version` | Print version and exit |
@@ -318,11 +302,11 @@ Available flags:
 | Package | Description |
 |---------|-------------|
 | `pkg/crypto` | Ed25519 batch verification, secp256k1 |
-| `pkg/poh` | Proof of History verification |
 | `pkg/svm` | Solana Virtual Machine (sBPF, syscalls, programs) |
 | `pkg/accounts` | Account state database (BadgerDB) |
 | `pkg/replayer` | Block replay and verification engine |
 | `pkg/blockstore` | Block storage (BoltDB) |
+| `pkg/rpc` | RPC client for block fetching |
 
 ## Verification vs Validation
 
@@ -342,9 +326,8 @@ X1-Nimbus is a **verifier**, not a validator:
 | Feature | X1-Stratus | X1-Nimbus |
 |---------|------------|-----------|
 | Trust Model | Trust-minimized (RPC verification) | Trustless (full verification) |
-| Block fetching | RPC polling | Geyser gRPC |
+| Block fetching | RPC polling | RPC polling |
 | Signature verification | Trusts RPC | Full Ed25519 |
-| PoH verification | Trusts RPC | Full SHA-256 |
 | Transaction execution | None | Full SVM |
 | State verification | None | Bank hash |
 | Memory usage | ~35 MB | 2-8 GB |
@@ -381,10 +364,9 @@ MemoryHigh=3G
 
 ### Connection issues
 
-If Geyser connection fails, X1-Nimbus will fall back to RPC polling. Check:
-- Geyser endpoint is correct
-- Authentication token is valid (if required)
-- Network allows gRPC connections
+X1-Nimbus uses RPC polling for block fetching. Check:
+- RPC endpoint is reachable: `curl https://rpc.mainnet.x1.xyz`
+- Network allows HTTPS connections
 
 ### Database corruption
 

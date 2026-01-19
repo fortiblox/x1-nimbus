@@ -31,7 +31,6 @@ VERSION_FILE="$INSTALL_DIR/.version"
 GO_VERSION="1.22.5"
 
 # Default settings
-DEFAULT_GEYSER_ENDPOINT="https://grpc.xolana.xen.network:443"
 DEFAULT_RPC_ENDPOINT="https://rpc.mainnet.x1.xyz"
 DEFAULT_RPC_PORT="8899"
 DEFAULT_METRICS_PORT="9090"
@@ -251,8 +250,6 @@ create_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         cat > "$CONFIG_FILE" << EOF
 {
-    "geyser_endpoint": "$DEFAULT_GEYSER_ENDPOINT",
-    "geyser_token": "",
     "rpc_endpoint": "$DEFAULT_RPC_ENDPOINT",
     "rpc_server": {
         "enabled": false,
@@ -267,7 +264,6 @@ create_config() {
     "commitment": "$DEFAULT_COMMITMENT",
     "verification": {
         "verify_signatures": true,
-        "verify_poh": true,
         "verify_bank_hash": true
     },
     "performance": {
@@ -288,8 +284,6 @@ install_service() {
     log_info "Installing systemd service..."
 
     # Parse config for service file
-    local geyser_url=$(jq -r '.geyser_endpoint // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
-    local geyser_token=$(jq -r '.geyser_token // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
     local rpc_endpoint=$(jq -r '.rpc_endpoint // ""' "$CONFIG_FILE" 2>/dev/null || echo "$DEFAULT_RPC_ENDPOINT")
     local data_dir=$(jq -r '.data_dir // ""' "$CONFIG_FILE" 2>/dev/null || echo "$DATA_DIR")
     local log_level=$(jq -r '.log_level // ""' "$CONFIG_FILE" 2>/dev/null || echo "$DEFAULT_LOG_LEVEL")
@@ -463,10 +457,10 @@ cmd_status() {
     if [[ -f "$CONFIG_FILE" ]]; then
         local commitment=$(jq -r '.commitment // "confirmed"' "$CONFIG_FILE" 2>/dev/null)
         local verify_sig=$(jq -r '.verification.verify_signatures // true' "$CONFIG_FILE" 2>/dev/null)
-        local verify_poh=$(jq -r '.verification.verify_poh // true' "$CONFIG_FILE" 2>/dev/null)
-        echo -e "  Commitment:       ${WHITE}$commitment${NC}"
+        local verify_bank=$(jq -r '.verification.verify_bank_hash // true' "$CONFIG_FILE" 2>/dev/null)
+        echo -e "  Commitment:        ${WHITE}$commitment${NC}"
         echo -e "  Verify Signatures: ${WHITE}$verify_sig${NC}"
-        echo -e "  Verify PoH:       ${WHITE}$verify_poh${NC}"
+        echo -e "  Verify Bank Hash:  ${WHITE}$verify_bank${NC}"
     fi
 
     # Latest activity
@@ -629,7 +623,6 @@ print_complete() {
     echo "X1-Nimbus is now running as a full verifying node."
     echo "It independently validates every transaction using:"
     echo "  - Ed25519 signature verification"
-    echo "  - Proof of History (PoH) verification"
     echo "  - Transaction execution via SVM"
     echo "  - Bank hash computation and verification"
     echo ""
@@ -663,10 +656,9 @@ main() {
     echo ""
     echo "Features:"
     echo "  - Ed25519 signature verification"
-    echo "  - Proof of History (PoH) verification"
     echo "  - Full transaction execution via SVM"
     echo "  - Bank hash computation and verification"
-    echo "  - Geyser gRPC streaming support"
+    echo "  - RPC-based block streaming"
     echo ""
 
     read -p "Continue with installation? [Y/n] " -n 1 -r

@@ -6,15 +6,46 @@ X1-Nimbus is a lightweight, full-verifying node that independently validates eve
 
 ## Features
 
-- **Trustless Verification** - Independently verifies all signatures, PoH, and state transitions
+- **Strong Verification** - Independently verifies signatures, transaction execution, and bank hash
 - **Full SVM Implementation** - Complete Solana Virtual Machine reimplementation in Go
-- **Low Hardware Requirements** - Runs on commodity hardware (4-8 GB RAM)
-- **Ed25519 Batch Verification** - High-performance signature verification with SIMD
-- **Native Program Execution** - System, Token, Vote, Stake, BPF Loader programs
+- **Low Hardware Requirements** - Runs on commodity hardware (2-4 GB RAM)
+- **Ed25519 Batch Verification** - High-performance signature verification
+- **Native Program Execution** - System, Token, Vote, Stake, BPF Loader, ALT, Compute Budget
+- **BPF Program Support** - sBPF interpreter for deployed programs
 - **Bank Hash Verification** - Exact hash compatibility with Solana/X1
-- **Geyser gRPC Support** - Real-time block streaming via Geyser protocol
-- **RPC Fallback** - Automatic fallback to RPC polling when Geyser unavailable
+- **RPC Fallback** - Works with standard RPC endpoints (no Geyser required)
 - **Auto-Reconnection** - Automatic reconnection on network disruptions
+- **Prometheus Metrics** - Full observability at `/metrics`
+
+## Trust Model
+
+X1-Nimbus provides **strong verification** without requiring a full validator node:
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **Signatures** | Verified | Ed25519 verification of all transaction signatures |
+| **Execution** | Verified | Full SVM execution of all transactions |
+| **State Changes** | Verified | Account deltas computed and tracked |
+| **Bank Hash** | Verified | Computed locally, proves execution correctness |
+| **Blockhash** | Trusted | Received from RPC (validators already verified PoH) |
+
+### Why No PoH Verification?
+
+PoH (Proof of History) verification requires entry-level data (num_hashes, entry boundaries) that the RPC API does not provide. This is a limitation of the Solana RPC specification, not Nimbus.
+
+**What this means:**
+- We trust that validators correctly verified the PoH chain before publishing the block
+- We independently verify everything else: signatures, execution, and resulting state
+- This is significantly stronger than trusting RPC responses directly
+
+### Comparison
+
+| Approach | Signatures | Execution | Bank Hash | PoH |
+|----------|------------|-----------|-----------|-----|
+| **X1-Nimbus** | Verified | Verified | Verified | Trusted |
+| Full Validator | Verified | Verified | Verified | Verified |
+| Light Client | Verified | Trusted | Trusted | Trusted |
+| Direct RPC | Trusted | Trusted | Trusted | Trusted |
 
 ## Architecture
 

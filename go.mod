@@ -1,8 +1,6 @@
 module github.com/fortiblox/x1-nimbus
 
-go 1.24.0
-
-toolchain go1.24.12
+go 1.22.0
 
 require (
 	github.com/dgraph-io/badger/v4 v4.9.0

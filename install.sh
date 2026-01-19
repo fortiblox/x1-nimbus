@@ -222,6 +222,23 @@ create_directories() {
     log_success "Directories created"
 }
 
+# Clone repository
+clone_repo() {
+    log_info "Cloning X1-Nimbus repository..."
+
+    if [[ -f "$INSTALL_DIR/go.mod" ]]; then
+        log_info "Source code already exists, pulling latest..."
+        cd "$INSTALL_DIR"
+        git pull origin main > /dev/null 2>&1 || true
+    else
+        # Remove empty directories if they exist
+        rm -rf "$INSTALL_DIR" 2>/dev/null || true
+        git clone "$REPO_URL" "$INSTALL_DIR"
+    fi
+
+    log_success "Repository ready"
+}
+
 # Build from source
 build_nimbus() {
     log_info "Building X1-Nimbus..."
@@ -230,7 +247,7 @@ build_nimbus() {
 
     export PATH=$PATH:/usr/local/go/bin
     go mod tidy > /dev/null 2>&1 || true
-    go build -o nimbus ./cmd/nimbus
+    CGO_ENABLED=0 go build -o nimbus ./cmd/nimbus
 
     # Install binary to bin directory
     mv nimbus "$INSTALL_DIR/bin/"
@@ -661,14 +678,19 @@ main() {
     echo "  - RPC-based block streaming"
     echo ""
 
-    read -p "Continue with installation? [Y/n] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]?$ ]]; then
-        echo "Installation cancelled."
-        exit 0
+    # Handle non-interactive mode (piped from curl)
+    if [[ -t 0 ]]; then
+        read -p "Continue with installation? [Y/n] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]?$ ]]; then
+            echo "Installation cancelled."
+            exit 0
+        fi
+    else
+        log_info "Non-interactive mode detected, auto-confirming..."
     fi
 
-    local total_steps=8
+    local total_steps=9
 
     print_step 1 $total_steps "Checking prerequisites"
     check_root
@@ -681,20 +703,23 @@ main() {
     print_step 3 $total_steps "Installing Go"
     install_go
 
-    print_step 4 $total_steps "Creating directories"
+    print_step 4 $total_steps "Cloning repository"
+    clone_repo
+
+    print_step 5 $total_steps "Creating directories"
     create_directories
 
-    print_step 5 $total_steps "Building X1-Nimbus"
+    print_step 6 $total_steps "Building X1-Nimbus"
     build_nimbus
 
-    print_step 6 $total_steps "Creating configuration"
+    print_step 7 $total_steps "Creating configuration"
     create_config
 
-    print_step 7 $total_steps "Installing service"
+    print_step 8 $total_steps "Installing service"
     install_service
     install_wrapper
 
-    print_step 8 $total_steps "Starting service"
+    print_step 9 $total_steps "Starting service"
     start_service
 
     print_complete

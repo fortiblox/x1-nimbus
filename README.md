@@ -177,9 +177,32 @@ mkdir -p /root/.config/x1-nimbus
 }
 ```
 
-7. Install the systemd service:
+7. The systemd service file is created automatically by the installer. For manual setup, create `/etc/systemd/system/x1-nimbus.service`:
+```ini
+[Unit]
+Description=X1-Nimbus Full Verifying Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/x1-nimbus/bin/nimbus \
+    --data-dir=/mnt/x1-nimbus \
+    --rpc-endpoint=https://rpc.mainnet.x1.xyz \
+    --commitment=confirmed \
+    --log-level=info \
+    --stats
+Restart=always
+RestartSec=10
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then reload systemd:
 ```bash
-sudo cp /etc/systemd/system/x1-nimbus.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 

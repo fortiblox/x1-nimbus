@@ -119,7 +119,7 @@ type PerformanceConfig struct {
 func defaultConfig() Config {
 	return Config{
 		Geyser: GeyserConfig{
-			Endpoint: "https://grpc.xolana.xen.network:443",
+			Endpoint: "",
 			Token:    "",
 		},
 		RPC: RPCConfig{

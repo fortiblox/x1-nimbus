@@ -649,10 +649,15 @@ func main() {
 		geyser.WithRPCPollInterval(*pollInterval),
 	}
 
-	// Add RPC fallback if configured
-	if *rpcEndpoint != "" {
-		opts = append(opts, geyser.WithRPCFallback(*rpcEndpoint))
+	// Determine the RPC endpoint to use for fallback
+	// If not explicitly set, use the default reference endpoint
+	rpcFallbackEndpoint := *rpcEndpoint
+	if rpcFallbackEndpoint == "" {
+		rpcFallbackEndpoint = referenceEndpoints[0]
 	}
+
+	// Always enable RPC fallback - this is required for the subscriber to work
+	opts = append(opts, geyser.WithRPCFallback(rpcFallbackEndpoint))
 
 	// Add Geyser token if configured
 	if *geyserToken != "" {
@@ -660,16 +665,20 @@ func main() {
 		opts = append(opts, geyser.WithTLS())
 	}
 
-	// Determine endpoint
+	// Determine endpoint (Geyser gRPC endpoint, or RPC endpoint for fallback mode)
 	endpoint := *geyserURL
-	if endpoint == "" && *rpcEndpoint != "" {
+	rpcOnlyMode := endpoint == ""
+	if rpcOnlyMode {
 		// Use RPC endpoint as the base (will use RPC fallback mode)
-		endpoint = *rpcEndpoint
-	}
+		endpoint = rpcFallbackEndpoint
 
-	if endpoint == "" {
-		// Use default reference endpoint
-		endpoint = referenceEndpoints[0]
+		// In RPC-only mode, PoH verification must be skipped because
+		// the RPC API doesn't provide entry-level data (num_hashes, entry boundaries)
+		// required for PoH verification. This is documented in the README.
+		if !*skipPoH {
+			log.Println("Note: PoH verification auto-disabled (RPC mode doesn't provide entry data)")
+			*skipPoH = true
+		}
 	}
 
 	client, err = geyser.NewClient(endpoint, opts...)
@@ -714,7 +723,11 @@ func main() {
 		log.Println("  [ON]   Ed25519 signature verification")
 	}
 	if *skipPoH {
-		log.Println("  [SKIP] PoH verification (UNSAFE)")
+		if rpcOnlyMode {
+			log.Println("  [SKIP] PoH verification (RPC mode - entry data unavailable)")
+		} else {
+			log.Println("  [SKIP] PoH verification (UNSAFE)")
+		}
 	} else {
 		log.Println("  [ON]   Proof of History verification")
 	}

@@ -102,6 +102,14 @@ func (s *Subscriber) blockSubscriptionLoop(ctx context.Context, commitment strin
 			}
 		}
 
+		// Apply a lag to avoid fetching blocks that aren't available yet
+		// The RPC returns the current slot, but block data takes several seconds to be available
+		// Using 32 slots (~12-15 seconds on X1) to give the RPC time to process and store blocks
+		const blockLag = 32
+		if currentSlot > blockLag {
+			currentSlot = currentSlot - blockLag
+		}
+
 		consecutiveErrors = 0
 
 		// If we have a last slot, fetch blocks we might have missed
@@ -119,7 +127,7 @@ func (s *Subscriber) blockSubscriptionLoop(ctx context.Context, commitment strin
 					if _, ok := err.(*SlotSkippedError); ok {
 						continue
 					}
-					// Other error - log and continue
+					// Other error - continue
 					continue
 				}
 
@@ -157,6 +165,8 @@ func (s *Subscriber) blockSubscriptionLoop(ctx context.Context, commitment strin
 			case <-ctx.Done():
 				return
 			}
+		} else {
+			lastSlot = types.Slot(currentSlot)
 		}
 
 		// Wait before polling again
